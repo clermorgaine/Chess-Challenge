@@ -5,25 +5,34 @@ using System.Linq;
 
 public class MyBot : IChessBot
 {
-    int MaxEval = 50000;
+    static int MaxEval = 500000;
+
+    
     public Move Think(Board board, Timer timer)
     {
+        
+        if (firstTurn && board.IsWhiteToMove) Console.WriteLine(string.Format(@"[FEN ""{0}""]", board.GameStartFenString.Trim()));
+
+        firstTurn = false;
+
         currentBoard = board;
         TurnTimer = timer;
 
         TimeAllotted = (timer.MillisecondsRemaining - 5000) / 10;
 
-        int depth = 0;
-        do
+        int depth = 2;
+        TranspositionEntry value =Search(depth, -MaxEval, MaxEval);
+        while (!SearchCancelled() && value.Value < MaxEval)
         {
-            depth++;
-            Search(depth, -MaxEval, MaxEval);            
-        } while (!SearchCancelled());
-        Move move = transpositionTable.GetMove();
-        ListMoves(depth);
-        return move;
+            depth += 2;
+            TranspositionEntry newValue = Search(depth, -MaxEval, MaxEval);
+            if (!SearchCancelled()) value = newValue;
+        }
+        Console.WriteLine(MoveName(value.BestMove) + "{Depth: " + (float)value.Depth / 2 + ", Eval: " + value.Value * Color(currentBoard.IsWhiteToMove) +"}");
+        return value.BestMove;
     }
 
+    
 
 
     Timer TurnTimer;
@@ -36,16 +45,16 @@ public class MyBot : IChessBot
 
     bool SearchCancelled() => TurnTimer.MillisecondsElapsedThisTurn > TimeAllotted;
 
-    int Search(int depth, int alpha, int beta)
+    TranspositionEntry Search(int depth, int alpha, int beta)
     {
-        if (depth == 0 || currentBoard.IsInCheckmate() || currentBoard.IsDraw()) return Heuristic();
+        if (depth == 0 || currentBoard.IsInCheckmate() || currentBoard.IsDraw()) return new (Move.NullMove, Heuristic(),  0);
 
         SortedSet<Move> Moves = new(currentBoard.GetLegalMoves(), new MoveComparer(transpositionTable));
         Move BestMove = Moves.First();
         foreach (Move move in Moves)
         {
             currentBoard.MakeMove(move);
-            int value = -Search(depth - 1, -beta, -alpha);
+            int value = -Search(depth - 2, -beta, -alpha).Value;
             currentBoard.UndoMove(move);
             if (alpha < value)
             {
@@ -54,13 +63,15 @@ public class MyBot : IChessBot
             }
             if (SearchCancelled())
             {
-                transpositionTable.Add(new(BestMove, (sbyte)(depth - 1)));
-                return alpha;
+                depth = 0; break;
             }
-            if (alpha >= beta) break;
+            if (alpha >= beta)
+            {
+                depth--; break;
+            }
         }
-        transpositionTable.Add(new(BestMove, depth));
-        return alpha;
+        transpositionTable.Add(new(BestMove, alpha, depth));
+        return new(BestMove, alpha, depth);
     }
 
     int Heuristic()
@@ -69,12 +80,13 @@ public class MyBot : IChessBot
         if (currentBoard.IsDraw()) return 0;
 
         //if (!immediate && currentBoard.GetLegalMoves(true).Length > 0) return Search(-1, -MaxEval, MaxEval);
-
+        
         int value = currentBoard.GetAllPieceLists().Sum(PieceValue);
+        
         int winningPlayer = Math.Sign(value);
         int material = currentBoard.GetAllPieceLists().Sum(p => Math.Abs(PieceValue(p)));
 
-        /*if (value != 0 && material <= 4600)
+        if (value != 0 && material <= 4600)
         {
             Square LoserKingSquare = currentBoard.GetKingSquare(winningPlayer == -1);
             //Square WinnerKingSquare = currentBoard.GetKingSquare(winningPlayer == 1);
@@ -82,7 +94,7 @@ public class MyBot : IChessBot
             value += (50 //currentBoard.GetPieceList(PieceType.Pawn, winningPlayer == 1).Select(p => winningPlayer == 1 ? p.Square.Rank : 7 - p.Square.Rank).Sum()
             - (Math.Min(LoserKingSquare.File, 7 - LoserKingSquare.File) + Math.Min(LoserKingSquare.Rank, 7 - LoserKingSquare.Rank))) * winningPlayer;
         }
-        */
+        
         return value * Color(currentBoard.IsWhiteToMove);
         
     }
@@ -92,8 +104,10 @@ public class MyBot : IChessBot
     static int[] _PieceValue = new int[] { 0, 100, 300, 300, 500, 900, 1000 };
     
     static string[] PieceName = new string[] { "", "", "N", "B", "R", "Q", "K" };
+    
+    bool firstTurn = true;
 
-    static string MoveName(Move move) => move.IsNull ? "null" :
+    static string MoveName(Move move) => move.IsNull ? "" :
         string.Format("{0} {1}{2}{3}{4}{5}{6} ",
         currentBoard.IsWhiteToMove ? (currentBoard.PlyCount/ 2 + 1).ToString() + "." : ((currentBoard.PlyCount + 1) / 2).ToString() + "...",
         PieceName[(int)move.MovePieceType],
@@ -102,11 +116,12 @@ public class MyBot : IChessBot
         move.TargetSquare.Name,
         move.IsPromotion ? "=" : "",
         PieceName[(int)move.PromotionPieceType]);
-
-    void ListMoves(int depth)
+    
+    /*void ListMoves(int depth)
     {
         Move move = transpositionTable.GetMove();
         string output = MoveName(move);
+        
         if (depth > 1)
         {            
             output += "(";
@@ -120,10 +135,8 @@ public class MyBot : IChessBot
             output += ")";
         }
         Console.WriteLine(output);
-    }
+    }*/
     
-    
-
     static int PieceValue(PieceType pieceType) => _PieceValue[(int)pieceType];
 
     static int PieceValue(PieceList pieces) => pieces.Count * PieceValue(pieces.TypeOfPieceInList) * Color(pieces.IsWhitePieceList);
@@ -154,7 +167,7 @@ public class MyBot : IChessBot
                // + PieceValue(x.MovePieceType) - PieceValue(y.MovePieceType);
             if (value != 0) return value;
             value = Heat(y.TargetSquare) - Heat(x.TargetSquare);
-            if (value != 0) return value;
+            if (value != 0) return value; 
             return Heat(x.StartSquare) - Heat(y.StartSquare);
         }
 
@@ -169,10 +182,11 @@ public class MyBot : IChessBot
     {
         Dictionary<ulong, TranspositionEntry> Table1 = new();
         Dictionary<ulong , TranspositionEntry> Table2 = new();
-        int MaxCapacity = 699050;
+        int MaxCapacity = 6710886;
         public void Add(TranspositionEntry entry)
         {
-            if (!Table1.TryAdd(key, entry) && Table1[key].Depth < entry.Depth) Table1[key] = entry;
+            if (Table2.ContainsKey(key)) Table1.TryAdd(key, Table2[key]);
+            if (!Table1.TryAdd(key, entry) && Table1[key].Replace(entry)) Table1[key] = entry;
             if (Table1.Count > MaxCapacity)
             {
                 Table2 = Table1;
@@ -195,16 +209,22 @@ public class MyBot : IChessBot
         ulong key => currentBoard.ZobristKey;
     }
 
+
     struct TranspositionEntry
     {
-        public TranspositionEntry (Move bestMove, int depth)
+        public TranspositionEntry (Move bestMove, int value, int depth)
         {
             BestMove = bestMove;
             Depth = depth;
+            Value = value;
         }
 
         public Move BestMove;
         public int Depth;
+        public int Value;
+
+        public bool Replace(TranspositionEntry NewEntry) => NewEntry.Depth > Depth || (NewEntry.Depth == Depth && NewEntry.Value > Value);
+ 
     }
 
 }
