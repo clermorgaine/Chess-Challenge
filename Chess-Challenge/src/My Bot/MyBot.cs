@@ -1,35 +1,35 @@
 ﻿using ChessChallenge.API;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
 public class MyBot : IChessBot
 {
-    static int MaxEval = 500000;
-
+    int MaxEval = 500000;
     
     public Move Think(Board board, Timer timer)
     {
         
-        if (firstTurn && board.IsWhiteToMove) Console.WriteLine(string.Format(@"[FEN ""{0}""]", board.GameStartFenString.Trim()));
+        /*if (firstTurn && board.IsWhiteToMove) Console.WriteLine(string.Format(@"[FEN ""{0}""]", board.GameStartFenString.Trim()));
 
-        firstTurn = false;
+        firstTurn = false; */
 
         currentBoard = board;
         TurnTimer = timer;
 
-        TimeAllotted = (timer.MillisecondsRemaining - 5000) / 10;
+        TimeAllotted = (timer.MillisecondsRemaining - 1000) / 10;
 
-        int depth = 2;
-        TranspositionEntry value =Search(depth, -MaxEval, MaxEval);
-        while (!SearchCancelled() && value.Value < MaxEval)
+        int depth = 0;
+        int value;
+        do
         {
             depth += 2;
-            TranspositionEntry newValue = Search(depth, -MaxEval, MaxEval);
-            if (!SearchCancelled()) value = newValue;
-        }
-        Console.WriteLine(MoveName(value.BestMove) + "{Depth: " + (float)value.Depth / 2 + ", Eval: " + value.Value * Color(currentBoard.IsWhiteToMove) +"}");
-        return value.BestMove;
+            value = Search(depth, -MaxEval, MaxEval);
+        } while (!SearchCancelled() && value < MaxEval);
+        //Console.WriteLine(MoveName(entry.BestMove) + "{Depth: " + (float)entry.Depth / 2 + ", Eval: " + entry.Value * Color(currentBoard.IsWhiteToMove) +"}");
+        return transpositionTable.GetMove();
     }
 
     
@@ -45,16 +45,24 @@ public class MyBot : IChessBot
 
     bool SearchCancelled() => TurnTimer.MillisecondsElapsedThisTurn > TimeAllotted;
 
-    TranspositionEntry Search(int depth, int alpha, int beta)
+    int Search(int depth, int alpha, int beta)
     {
-        if (depth == 0 || currentBoard.IsInCheckmate() || currentBoard.IsDraw()) return new (Move.NullMove, Heuristic(),  0);
+        if (currentBoard.IsInCheckmate()) return -MaxEval;
+        if (currentBoard.IsDraw()) return 0;
+
+        if (depth == 0)
+        {
+            int value = currentBoard.GetAllPieceLists().Sum(PieceValue);
+            return value * Color(currentBoard.IsWhiteToMove);
+        }
+
 
         SortedSet<Move> Moves = new(currentBoard.GetLegalMoves(), new MoveComparer(transpositionTable));
         Move BestMove = Moves.First();
         foreach (Move move in Moves)
         {
             currentBoard.MakeMove(move);
-            int value = -Search(depth - 2, -beta, -alpha).Value;
+            int value = -Search(depth - 2, -beta, -alpha);
             currentBoard.UndoMove(move);
             if (alpha < value)
             {
@@ -70,40 +78,15 @@ public class MyBot : IChessBot
                 depth--; break;
             }
         }
-        transpositionTable.Add(new(BestMove, alpha, depth));
-        return new(BestMove, alpha, depth);
-    }
-
-    int Heuristic()
-    {
-        if (currentBoard.IsInCheckmate()) return -MaxEval;
-        if (currentBoard.IsDraw()) return 0;
-
-        //if (!immediate && currentBoard.GetLegalMoves(true).Length > 0) return Search(-1, -MaxEval, MaxEval);
-        
-        int value = currentBoard.GetAllPieceLists().Sum(PieceValue);
-        
-        int winningPlayer = Math.Sign(value);
-        int material = currentBoard.GetAllPieceLists().Sum(p => Math.Abs(PieceValue(p)));
-
-        if (value != 0 && material <= 4600)
-        {
-            Square LoserKingSquare = currentBoard.GetKingSquare(winningPlayer == -1);
-            //Square WinnerKingSquare = currentBoard.GetKingSquare(winningPlayer == 1);
-            //value -= Math.Abs(LoserKingSquare.File-WinnerKingSquare.File) + Math.Abs(LoserKingSquare.Rank - WinnerKingSquare.Rank);
-            value += (50 //currentBoard.GetPieceList(PieceType.Pawn, winningPlayer == 1).Select(p => winningPlayer == 1 ? p.Square.Rank : 7 - p.Square.Rank).Sum()
-            - (Math.Min(LoserKingSquare.File, 7 - LoserKingSquare.File) + Math.Min(LoserKingSquare.Rank, 7 - LoserKingSquare.Rank))) * winningPlayer;
-        }
-        
-        return value * Color(currentBoard.IsWhiteToMove);
-        
+        transpositionTable.Add(new() {BestMove = BestMove, Depth = depth, Value = alpha });
+        return alpha;
     }
 
     static int Color(bool isWhite) => isWhite ? 1 : -1;
 
-    static int[] _PieceValue = new int[] { 0, 100, 300, 300, 500, 900, 1000 };
+    static int[] _PieceValue = new[] { 0, 100, 300, 300, 500, 900, 1000 };
     
-    static string[] PieceName = new string[] { "", "", "N", "B", "R", "Q", "K" };
+    /* static string[] PieceName = new string[] { "", "", "N", "B", "R", "Q", "K" };
     
     bool firstTurn = true;
 
@@ -141,67 +124,53 @@ public class MyBot : IChessBot
 
     static int PieceValue(PieceList pieces) => pieces.Count * PieceValue(pieces.TypeOfPieceInList) * Color(pieces.IsWhitePieceList);
 
+    static NNBody PolicyHead;
+
     class MoveComparer : IComparer<Move>
     {
         public MoveComparer(TranspositionTable transpositionTable)
         {
             BestMove = transpositionTable.GetMove();
-
-            /*int value = currentBoard.GetAllPieceLists().Sum(PieceValue) * Color(currentBoard.IsWhiteToMove);
-            int material = currentBoard.GetAllPieceLists().Sum(p => Math.Abs(PieceValue(p)));
-
-            EndGame = (value > 500 || (value > 0 && material <= 4600));
-            TargetSquare = currentBoard.GetKingSquare(!currentBoard.IsWhiteToMove);*/
         }
-
         Move BestMove;
-        //bool EndGame;
-        //Square TargetSquare;
-
         public int Compare(Move x, Move y)
         {
             if (BestMove.Equals(x)) return -1;
             if (BestMove.Equals(y)) return 1;
 
             int value = PieceValue(y.PromotionPieceType) - PieceValue(x.PromotionPieceType) + PieceValue(y.CapturePieceType) - PieceValue(x.CapturePieceType);
-               // + PieceValue(x.MovePieceType) - PieceValue(y.MovePieceType);
             if (value != 0) return value;
-            value = Heat(y.TargetSquare) - Heat(x.TargetSquare);
-            if (value != 0) return value; 
-            return Heat(x.StartSquare) - Heat(y.StartSquare);
+            return Heat(y.TargetSquare) - Heat(x.TargetSquare) + Heat(y.StartSquare) - Heat(x.StartSquare);
         }
 
         int Heat(Square square)
         {
-            // if (EndGame) return -(Math.Abs(TargetSquare.File - square.File) + Math.Abs(TargetSquare.Rank - square.Rank));
             return Math.Min(square.File, 7 - square.File) + Math.Min(square.Rank, 7 - square.Rank);
         }
     }
 
     class TranspositionTable
     {
-        Dictionary<ulong, TranspositionEntry> Table1 = new();
-        Dictionary<ulong , TranspositionEntry> Table2 = new();
-        int MaxCapacity = 6710886;
+        Dictionary<ulong, TranspositionEntry> Table = new();
+        Queue<ulong> RemovalQueue = new();
+        int MaxCapacity = 13421772;
         public void Add(TranspositionEntry entry)
         {
-            if (Table2.ContainsKey(key)) Table1.TryAdd(key, Table2[key]);
-            if (!Table1.TryAdd(key, entry) && Table1[key].Replace(entry)) Table1[key] = entry;
-            if (Table1.Count > MaxCapacity)
+            if (!Table.TryAdd(key, entry) && Table[key].Replace(entry)) Table[key] = entry;
+            RemovalQueue.Enqueue(key);
+            while (Table.Count > MaxCapacity)
             {
-                Table2 = Table1;
-                Table1 = new();
+                ulong KeyToRemove = RemovalQueue.Dequeue();
+                if (!RemovalQueue.Contains(KeyToRemove)) Table.Remove(KeyToRemove);
             }
         }
 
         public Move GetMove()
         {
-            if (Table1.ContainsKey(key)) return Table1[key].BestMove;
-            if (Table2.ContainsKey(key))
+            if (Table.ContainsKey(key))
             {
-                TranspositionEntry result = Table2[key];
-                Add(result);
-                return result.BestMove;
+                RemovalQueue.Enqueue(key);
+                return Table[key].BestMove;
             }
             return Move.NullMove;
         }
@@ -209,22 +178,70 @@ public class MyBot : IChessBot
         ulong key => currentBoard.ZobristKey;
     }
 
-
     struct TranspositionEntry
     {
-        public TranspositionEntry (Move bestMove, int value, int depth)
-        {
-            BestMove = bestMove;
-            Depth = depth;
-            Value = value;
-        }
-
         public Move BestMove;
         public int Depth;
         public int Value;
 
-        public bool Replace(TranspositionEntry NewEntry) => NewEntry.Depth > Depth || (NewEntry.Depth == Depth && NewEntry.Value > Value);
+        public bool Replace(TranspositionEntry NewEntry) => NewEntry.Depth > Depth || (NewEntry.Depth==Depth && NewEntry.Value > Value);
  
+    }
+
+    class NNBody
+    {
+        ulong ConvKernelMask = 0b1111000011110000111100001111;
+        int[] ConvKernelShifts = new[] { 0, 4, 32, 36 };
+        List<ValueTuple<PieceType, bool>> PieceColors = new();
+        ulong[] kernels;
+        List<List<BitArray>> layers;
+        ulong[] PackedConvKernels = new ulong[32];
+
+        public NNBody()
+        {
+            foreach(PieceType p in Enum.GetValues(typeof(PieceType))) 
+            {
+                PieceColors.Add((p, true));
+                PieceColors.Add((p, false));
+            }
+            kernels = PackedConvKernels.SelectMany(input => ConvKernelShifts.Select(shift => ((ConvKernelMask << shift) & input) >> shift)).ToArray();
+        }
+
+       List<ulong> Segment(ulong input, int length, int count)
+       {
+            List<ulong> results = new();
+            for (int i = 0; i < count; i++) 
+            {
+                results.Add(input % 1 << length);
+                input = input >> length;
+            }
+            return results;
+       }
+
+        protected BitArray Output()
+        {
+            ulong[] inputs = PieceColors.Select(v => currentBoard.GetPieceBitboard(v.Item1, v.Item2)).ToArray();
+            List<bool> results = new();
+            int nOutputs = 32;
+            for (int output = 0; output < nOutputs; output++)
+            {
+                for (int i = 0; i <= 32; i += 8)
+                {
+                    for (int shift = i; shift <= i + 4; shift++)
+                    {
+                        int sum = 0;
+                        for (int input = 0; input < 12; input++)
+                        {
+                            sum += BitOperations.PopCount((kernels[output * nOutputs + input] << shift ^ inputs[input]) & ConvKernelMask << shift);
+                        }
+                        results.Add(sum > 96);
+                    }
+                }
+            }
+            
+            
+            return Outputs;
+        }
     }
 
 }
