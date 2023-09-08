@@ -1,4 +1,5 @@
 ﻿using ChessChallenge.API;
+using Microsoft.CodeAnalysis;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -7,11 +8,10 @@ using System.Numerics;
 
 public class MyBot : IChessBot
 {
-    int MaxEval = 500000;
-    
+
     public Move Think(Board board, Timer timer)
     {
-        
+
         /*if (firstTurn && board.IsWhiteToMove) Console.WriteLine(string.Format(@"[FEN ""{0}""]", board.GameStartFenString.Trim()));
 
         firstTurn = false; */
@@ -22,70 +22,76 @@ public class MyBot : IChessBot
         TimeAllotted = (timer.MillisecondsRemaining - 1000) / 10;
 
         int depth = 0;
-        int value;
         do
         {
-            depth += 2;
-            value = Search(depth, -MaxEval, MaxEval);
-        } while (!SearchCancelled() && value < MaxEval);
+            depth++;
+            Search(depth, float.NegativeInfinity, float.PositiveInfinity);
+        } while (!SearchCancelled);
         //Console.WriteLine(MoveName(entry.BestMove) + "{Depth: " + (float)entry.Depth / 2 + ", Eval: " + entry.Value * Color(currentBoard.IsWhiteToMove) +"}");
-        return transpositionTable.GetMove();
+        return GetTableMove();
     }
 
-    
-
-
     Timer TurnTimer;
-
     int TimeAllotted;
+    Board currentBoard;
+    ulong key => currentBoard.ZobristKey;
+    bool SearchCancelled => TurnTimer.MillisecondsElapsedThisTurn > TimeAllotted;
 
-    static Board currentBoard;
-
-    TranspositionTable transpositionTable = new();
-
-    bool SearchCancelled() => TurnTimer.MillisecondsElapsedThisTurn > TimeAllotted;
-
-    int Search(int depth, int alpha, int beta)
+    float Search(int depth, float alpha, float beta)
     {
-        if (currentBoard.IsInCheckmate()) return -MaxEval;
+        if (currentBoard.IsInCheckmate()) return float.NegativeInfinity;
         if (currentBoard.IsDraw()) return 0;
 
         if (depth == 0)
         {
-            int value = currentBoard.GetAllPieceLists().Sum(PieceValue);
-            return value * Color(currentBoard.IsWhiteToMove);
+            bool[] Layer2Activations = Activation(BodyOutput(), ValueWeightsLayer1, 16 /* 16b */);
+            return
+                (currentBoard.GetAllPieceLists().Sum(pieces => pieces.Count * new []{ 0, 100, 300, 300, 500, 900, 0 }[(int)pieces.TypeOfPieceInList] * (pieces.IsWhitePieceList ? 1 : -1))
+
+                + MathF.Tan(0 + new float[] { }.Where((value, index) => Layer2Activations[index]).Sum()) * 250)
+
+                * (currentBoard.IsWhiteToMove ? 1 : -1);
         }
 
 
-        SortedSet<Move> Moves = new(currentBoard.GetLegalMoves(), new MoveComparer(transpositionTable));
-        Move BestMove = Moves.First();
+        Move BestMove = GetTableMove();
+        IEnumerable<Move> Moves = currentBoard.GetLegalMoves().OrderBy(new MoveComparer { BestMove = BestMove
+            /* HeatMap = MatrixMultiply(
+                new(Activation(BodyOutput(), PolicyWeightsLayer1, 16 /* 16b *)),
+                PolicyWeightsLayer2, 16 /*4c*)*/ }.MoveRating); 
+
+
         foreach (Move move in Moves)
         {
             currentBoard.MakeMove(move);
-            int value = -Search(depth - 2, -beta, -alpha);
+            float value = -Search(depth - 1, -beta, -alpha);
             currentBoard.UndoMove(move);
             if (alpha < value)
             {
                 BestMove = move;
                 alpha = value;
             }
-            if (SearchCancelled())
+            if (SearchCancelled)
             {
                 depth = 0; break;
             }
-            if (alpha >= beta)
-            {
-                depth--; break;
-            }
+            if (alpha >= beta) break;
         }
-        transpositionTable.Add(new() {BestMove = BestMove, Depth = depth, Value = alpha });
+
+
+        TranspositionEntry entry = new() { BestMove = BestMove, Depth = depth, Value = alpha };
+        if (!Table.TryAdd(key, entry) && Table[key].Replace(entry)) Table[key] = entry;
+        RemovalQueue.Enqueue(key);
+        while (Table.Count > 8388608)
+        {
+            ulong KeyToRemove = RemovalQueue.Dequeue();
+            if (!RemovalQueue.Contains(KeyToRemove)) Table.Remove(KeyToRemove);
+        }
+
+
         return alpha;
     }
 
-    static int Color(bool isWhite) => isWhite ? 1 : -1;
-
-    static int[] _PieceValue = new[] { 0, 100, 300, 300, 500, 900, 1000 };
-    
     /* static string[] PieceName = new string[] { "", "", "N", "B", "R", "Q", "K" };
     
     bool firstTurn = true;
@@ -119,130 +125,70 @@ public class MyBot : IChessBot
         }
         Console.WriteLine(output);
     }*/
-    
-    static int PieceValue(PieceType pieceType) => _PieceValue[(int)pieceType];
 
-    static int PieceValue(PieceList pieces) => pieces.Count * PieceValue(pieces.TypeOfPieceInList) * Color(pieces.IsWhitePieceList);
+    //static int[] PieceValue = { 0, 100, 300, 300, 500, 900, 0 };
 
-    static NNBody PolicyHead;
-
-    class MoveComparer : IComparer<Move>
+    class MoveComparer
     {
-        public MoveComparer(TranspositionTable transpositionTable)
-        {
-            BestMove = transpositionTable.GetMove();
-        }
-        Move BestMove;
-        public int Compare(Move x, Move y)
-        {
-            if (BestMove.Equals(x)) return -1;
-            if (BestMove.Equals(y)) return 1;
+        public Move BestMove;
+        public int[] HeatMap;
 
-            int value = PieceValue(y.PromotionPieceType) - PieceValue(x.PromotionPieceType) + PieceValue(y.CapturePieceType) - PieceValue(x.CapturePieceType);
-            if (value != 0) return value;
-            return Heat(y.TargetSquare) - Heat(x.TargetSquare) + Heat(y.StartSquare) - Heat(x.StartSquare);
-        }
-
-        int Heat(Square square)
-        {
-            return Math.Min(square.File, 7 - square.File) + Math.Min(square.Rank, 7 - square.Rank);
-        }
+        public int MoveRating(Move move) => (move == BestMove ? 1000 : 0)  /* +  PieceValue[(int)move.PromotionPieceType] + PieceValue[(int)move.CapturePieceType]*/ - HeatMap[move.TargetSquare.Index] - HeatMap[move.StartSquare.Index];
     }
 
-    class TranspositionTable
+    Dictionary<ulong, TranspositionEntry> Table = new();
+    Queue<ulong> RemovalQueue = new();
+
+    Move GetTableMove()
     {
-        Dictionary<ulong, TranspositionEntry> Table = new();
-        Queue<ulong> RemovalQueue = new();
-        int MaxCapacity = 13421772;
-        public void Add(TranspositionEntry entry)
+        if (Table.ContainsKey(key))
         {
-            if (!Table.TryAdd(key, entry) && Table[key].Replace(entry)) Table[key] = entry;
             RemovalQueue.Enqueue(key);
-            while (Table.Count > MaxCapacity)
-            {
-                ulong KeyToRemove = RemovalQueue.Dequeue();
-                if (!RemovalQueue.Contains(KeyToRemove)) Table.Remove(KeyToRemove);
-            }
+            return Table[key].BestMove;
         }
-
-        public Move GetMove()
-        {
-            if (Table.ContainsKey(key))
-            {
-                RemovalQueue.Enqueue(key);
-                return Table[key].BestMove;
-            }
-            return Move.NullMove;
-        }
-
-        ulong key => currentBoard.ZobristKey;
+        return Move.NullMove;
     }
 
     struct TranspositionEntry
     {
         public Move BestMove;
         public int Depth;
-        public int Value;
+        public float Value;
 
-        public bool Replace(TranspositionEntry NewEntry) => NewEntry.Depth > Depth || (NewEntry.Depth==Depth && NewEntry.Value > Value);
- 
+        public bool Replace(TranspositionEntry NewEntry) => NewEntry.Depth > Depth || NewEntry.Depth == Depth && NewEntry.Value > Value;
     }
 
-    class NNBody
+    const ulong ConvKernelMask = 0b1111000011110000111100001111;
+    IEnumerable<int> ConvOutputShifts = Enumerable.Range(0, 64).Where(i => (0b1111100011111000111110001111100011111 & (ulong)1 << i) > 0);
+    ulong[] BodyWeightsLayer1 = new ulong[] { }
+        .SelectMany(input => new[] { 0, 4, 32, 36 }.Select(shift => ((ConvKernelMask << shift) & input) >> shift)).ToArray();
+    BitArray BodyWeightsLayer2 = Unpack(new ulong[] { });
+    BitArray ValueWeightsLayer1 = Unpack(new ulong[] { });
+    /*BitArray PolicyWeightsLayer1 = Unpack(new ulong[] { });
+    BitArray PolicyWeightsLayer2 = Unpack(new ulong[] { });*/
+
+    static BitArray Unpack(ulong[] tokens) => new(tokens.SelectMany(BitConverter.GetBytes).ToArray());
+
+    BitArray BodyOutput()
     {
-        ulong ConvKernelMask = 0b1111000011110000111100001111;
-        int[] ConvKernelShifts = new[] { 0, 4, 32, 36 };
-        List<ValueTuple<PieceType, bool>> PieceColors = new();
-        ulong[] kernels;
-        List<List<BitArray>> layers;
-        ulong[] PackedConvKernels = new ulong[32];
-
-        public NNBody()
-        {
-            foreach(PieceType p in Enum.GetValues(typeof(PieceType))) 
-            {
-                PieceColors.Add((p, true));
-                PieceColors.Add((p, false));
-            }
-            kernels = PackedConvKernels.SelectMany(input => ConvKernelShifts.Select(shift => ((ConvKernelMask << shift) & input) >> shift)).ToArray();
-        }
-
-       List<ulong> Segment(ulong input, int length, int count)
-       {
-            List<ulong> results = new();
-            for (int i = 0; i < count; i++) 
-            {
-                results.Add(input % 1 << length);
-                input = input >> length;
-            }
-            return results;
-       }
-
-        protected BitArray Output()
-        {
-            ulong[] inputs = PieceColors.Select(v => currentBoard.GetPieceBitboard(v.Item1, v.Item2)).ToArray();
-            List<bool> results = new();
-            int nOutputs = 32;
-            for (int output = 0; output < nOutputs; output++)
-            {
-                for (int i = 0; i <= 32; i += 8)
-                {
-                    for (int shift = i; shift <= i + 4; shift++)
-                    {
-                        int sum = 0;
-                        for (int input = 0; input < 12; input++)
-                        {
-                            sum += BitOperations.PopCount((kernels[output * nOutputs + input] << shift ^ inputs[input]) & ConvKernelMask << shift);
-                        }
-                        results.Add(sum > 96);
-                    }
-                }
-            }
-            
-            
-            return Outputs;
-        }
+        IEnumerable<ulong> inputs = Enumerable.Range(1, 6).SelectMany(i => new[]{ true, false }.Select(b => currentBoard.GetPieceBitboard((PieceType)i, b)));
+        return new(Activation(
+                    new(Enumerable.Range(0, 16 /* 4a */).SelectMany(output =>
+                            ConvOutputShifts.Select(shift =>
+                                inputs.Select((input, index) => BitOperations.PopCount((BodyWeightsLayer1[output * 12 /* i */ + index] << shift ^ input) & ConvKernelMask << shift))
+                                .Sum() > 96 /* 8i */ ))
+                    .ToArray()),
+                BodyWeightsLayer2, 400 /* 100a */));
+        
     }
 
-}
+    bool[] Activation(BitArray a, BitArray b, int width)
+    {
+        bool[] result = new bool[a.Count];
+        a.Xor(b).CopyTo(result, 0);
+        return result.Chunk(width).Select(i => i.Count(b => b))/*.ToArray();
+    }
 
+    bool[] Activation(BitArray a, BitArray b, int width) => MatrixMultiply(a, b, width)*/.Select(count => count * 2 > width).ToArray();
+    }
+}
